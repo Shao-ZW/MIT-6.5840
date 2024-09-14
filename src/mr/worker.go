@@ -4,7 +4,12 @@ import "fmt"
 import "log"
 import "net/rpc"
 import "hash/fnv"
-
+import "os"
+import "io"
+import "strconv"
+import "sort"
+import "encoding/json"
+import "time"
 
 //
 // Map functions return a slice of KeyValue.
@@ -14,7 +19,14 @@ type KeyValue struct {
 	Value string
 }
 
-//
+// for sorting by key.
+type ByKey []KeyValue
+
+// for sorting by key.
+func (a ByKey) Len() int           { return len(a) }
+func (a ByKey) Swap(i, j int)      { a[i], a[j] = a[j], a[i] }
+func (a ByKey) Less(i, j int) bool { return a[i].Key < a[j].Key }
+
 // use ihash(key) % NReduce to choose the reduce
 // task number for each KeyValue emitted by Map.
 //
@@ -32,10 +44,111 @@ func Worker(mapf func(string, string) []KeyValue,
 	reducef func(string, []string) string) {
 
 	// Your worker implementation here.
+	for {
+		args := Args{}
+		reply := Reply{}
+		ok := call("Coordinator.AssignTaskHandler", &args, &reply)
 
-	// uncomment to send the Example RPC to the coordinator.
-	// CallExample()
+		if !ok || reply.TaskType == 3 {
+			break
+		}
 
+		if reply.TaskType == 0 {
+			readfile, err := os.Open(reply.FileName)
+			if err != nil {
+				log.Fatalf("Error open %v: %v", reply.FileName, err)
+			}
+			content, err := io.ReadAll(readfile)
+			if err != nil {
+				log.Fatalf("Error read %v: %v", reply.FileName, err)
+			}
+			readfile.Close()
+
+			kva := mapf(reply.FileName, string(content))
+
+			tempfiles := make([]*os.File, reply.ReduceNum)
+			encoders := make([]*json.Encoder, reply.ReduceNum)
+
+			for i := 0; i < reply.ReduceNum; i++ {
+				tempname := "mr-" + strconv.Itoa(reply.TaskId) + "-" + strconv.Itoa(i) + "_"
+				tempfiles[i], err = os.CreateTemp("", tempname)
+				if err != nil {
+					log.Fatalf("Error create %v: %v", tempname, err)
+				}
+				encoders[i] = json.NewEncoder(tempfiles[i])
+			}
+
+			for _, kv := range kva {
+				err := encoders[ihash(kv.Key)%reply.ReduceNum].Encode(&kv)
+				if err != nil {
+					log.Fatalf("Error encoding: %v", err)
+				}
+			}
+
+			for i, tempfile := range tempfiles {
+				oname := "mr-" + strconv.Itoa(reply.TaskId) + "-" + strconv.Itoa(i)
+				os.Rename(tempfile.Name(), oname)
+				tempfile.Close()
+			}
+
+			args.TaskId = reply.TaskId
+			args.TaskType = reply.TaskType
+			call("Coordinator.FinishTaskHandler", &args, &reply)
+		} else if reply.TaskType == 1 {
+			kva := []KeyValue{}
+			for i := 0; i < reply.MapNum; i++ {
+				tempname := "mr-" + strconv.Itoa(i) + "-" + strconv.Itoa(reply.TaskId)
+				tempfile, err := os.Open(tempname)
+				if err != nil {
+					log.Fatalf("Error open %v: %v", tempfile, err)
+				}
+
+				decoder := json.NewDecoder(tempfile)
+				for {
+					var kv KeyValue
+					err := decoder.Decode(&kv)
+					if err == io.EOF {
+						break
+					}
+					if err != nil {
+						log.Fatalf("Error decoding: %v", err)
+					}
+					kva = append(kva, kv)
+				}
+
+				tempfile.Close()
+			}
+
+			sort.Sort(ByKey(kva))
+
+			oname := "mr-out-" + strconv.Itoa(reply.TaskId)
+			ofile, err := os.Create(oname)
+			if err != nil {
+				log.Fatalf("Error create %v: %v", oname, err)
+			}
+
+			for i := 0; i < len(kva); {
+				j := i + 1
+				for j < len(kva) && kva[j].Key == kva[i].Key {
+					j++
+				}
+				values := []string{}
+				for k := i; k < j; k++ {
+					values = append(values, kva[k].Value)
+				}
+				output := reducef(kva[i].Key, values)
+				fmt.Fprintf(ofile, "%v %v\n", kva[i].Key, output)
+				i = j
+			}
+			ofile.Close()
+
+			args.TaskId = reply.TaskId
+			args.TaskType = reply.TaskType
+			call("Coordinator.FinishTaskHandler", &args, &reply)
+		} else if reply.TaskType == 2 {
+			time.Sleep(time.Second)
+		}
+	}
 }
 
 //
