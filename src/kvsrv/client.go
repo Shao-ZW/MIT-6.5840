@@ -6,9 +6,9 @@ import "math/big"
 
 
 type Clerk struct {
-	server 		*labrpc.ClientEnd
+	server      *labrpc.ClientEnd
 	// You will have to modify this struct.
-	clientid	int
+	clientid    int
 	putappendid int
 }
 

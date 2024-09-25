@@ -16,9 +16,9 @@ func DPrintf(format string, a ...interface{}) (n int, err error) {
 
 
 type KVServer struct {
-	mu 				sync.Mutex
-	kvmap 			map[string]string
-	appendrecords	map[int]map[int]string
+	mu            sync.Mutex
+	kvmap         map[string]string
+	appendrecords map[int]map[int]string
 	// Your definitions here.
 }
 
