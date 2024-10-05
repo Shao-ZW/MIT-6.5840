@@ -102,6 +102,8 @@ func make_config(t *testing.T, n int, unreliable bool, snapshot bool) *config {
 		cfg.connect(i)
 	}
 
+	InitDebug(n)
+
 	return cfg
 }
 
