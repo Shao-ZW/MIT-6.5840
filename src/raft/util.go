@@ -44,7 +44,7 @@ func (msg *ApplyMsg) Format() string {
     if msg.CommandValid {
         commandStr = fmt.Sprintf("%v", msg.Command)
     }
-    return fmt.Sprintf("ApplyMsg{CommandValid: %t, Command: %s, CommandIndex: %d, SnapshotValid: %t, SnapshotTerm: %d, SnapshotIndex: %d}", msg.CommandValid, commandStr, msg.CommandIndex, msg.SnapshotValid, msg.SnapshotTerm, msg.SnapshotIndex)
+    return fmt.Sprintf("ApplyMsg{CommandValid: %t, Command: %s, CommandIndex: %d, SnapshotValid: %t, SnapshotTerm: %d, SnapshotIndex: %d, Snapshot: %v}", msg.CommandValid, commandStr, msg.CommandIndex, msg.SnapshotValid, msg.SnapshotTerm, msg.SnapshotIndex, msg.Snapshot)
 }
 
 func (rf *Raft) Format() string {
@@ -75,7 +75,7 @@ func (rf *Raft) Format() string {
        matchIndexStr = matchIndexStr[:len(matchIndexStr)-2] + "]"
     }
     
-    return fmt.Sprintf("Raft{state: %d, currentTerm: %d, voteFor: %d, log: %s, commitIndex: %d, lastApplied: %d, nextIndex: %s, matchIndex: %s}", rf.state, rf.currentTerm, rf.voteFor, logStr, rf.commitIndex, rf.lastApplied, nextIndexStr, matchIndexStr)
+    return fmt.Sprintf("Raft{state: %d, currentTerm: %d, voteFor: %d, log: %s, commitIndex: %d, lastApplied: %d, snapshotIndex: %d, snapshotTerm: %d, nextIndex: %s, matchIndex: %s}", rf.state, rf.currentTerm, rf.voteFor, logStr, rf.commitIndex, rf.lastApplied, rf.snapshotIndex, rf.snapshotTerm, nextIndexStr, matchIndexStr)
 }
 
 func (args *RequestVoteArgs) Format() string {
@@ -101,4 +101,12 @@ func (args *AppendEntriesArgs) Format() string {
 
 func (reply *AppendEntriesReply) Format() string {
     return fmt.Sprintf("AppendEntriesReply{Term: %d, Success: %t}", reply.Term, reply.Success)
+}
+
+func (args *InstallSnapshotArgs) Format() string {
+    return fmt.Sprintf("InstallSnapshotArgs{Term: %d, LeaderId: %d, LastIncludedIndex: %d, LastIncludedTerm: %d}", args.Term, args.LeaderId, args.LastIncludedIndex, args.LastIncludedTerm)
+}
+
+func (reply *InstallSnapshotReply) Format() string {
+    return fmt.Sprintf("InstallSnapshotReply{Term: %d}", reply.Term)
 }
