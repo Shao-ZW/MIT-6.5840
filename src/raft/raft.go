@@ -447,11 +447,14 @@ func (rf *Raft) sendAppendEntries(server int, args AppendEntriesArgs) {
 			prevLogPos := prevLogIndex - rf.log[0].Index
 
 			if prevLogPos < 0 {
-				args := InstallSnapshotArgs{Term: rf.currentTerm, LeaderId: rf.me, LastIncludedIndex: rf.snapshotIndex, LastIncludedTerm: rf.snapshotTerm, Data: rf.snapshot}
+				data := make([]byte, len(rf.snapshot))
+				copy(data, rf.snapshot)
+				args := InstallSnapshotArgs{Term: rf.currentTerm, LeaderId: rf.me, LastIncludedIndex: rf.snapshotIndex, LastIncludedTerm: rf.snapshotTerm, Data: data}
 				go rf.sendInstallSnapshot(server, args)
 			} else {
+				entries := make([]LogEntry, len(rf.log[prevLogPos + 1:]))
+				copy(entries, rf.log[prevLogPos + 1:])
 				prevLogTerm := rf.log[prevLogPos].Term
-				entries := rf.log[prevLogPos + 1:]
 				args := AppendEntriesArgs{Term: rf.currentTerm, LeaderId: rf.me, PrevLogIndex: prevLogIndex, PrevLogTerm: prevLogTerm, Entries: entries, LeaderCommit: rf.commitIndex}
 				go rf.sendAppendEntries(server, args)
 			}
@@ -576,12 +579,15 @@ func (rf *Raft) heartBeater() {
 					prevLogPos := prevLogIndex - rf.log[0].Index
 
 					if prevLogPos < 0 {
-						args := InstallSnapshotArgs{Term: rf.currentTerm, LeaderId: rf.me, LastIncludedIndex: rf.snapshotIndex, LastIncludedTerm: rf.snapshotTerm, Data: rf.snapshot}
+						data := make([]byte, len(rf.snapshot))
+						copy(data, rf.snapshot)
+						args := InstallSnapshotArgs{Term: rf.currentTerm, LeaderId: rf.me, LastIncludedIndex: rf.snapshotIndex, LastIncludedTerm: rf.snapshotTerm, Data: data}
 						DPrintf(rf.me, "Start Send InstallSnapshot Request to server %v:\n\t%v\n\t%v", i, args.Format(), rf.Format())
 						go rf.sendInstallSnapshot(i, args)
 					} else {
+						entries := make([]LogEntry, len(rf.log[prevLogPos + 1:]))
+						copy(entries, rf.log[prevLogPos + 1:])
 						prevLogTerm := rf.log[prevLogPos].Term
-						entries := rf.log[prevLogPos + 1:]
 						args := AppendEntriesArgs{Term: rf.currentTerm, LeaderId: rf.me, PrevLogIndex: prevLogIndex, PrevLogTerm: prevLogTerm, Entries: entries, LeaderCommit: rf.commitIndex}
 						DPrintf(rf.me, "Start Send Heartbeats(AppendRequest) to server %v:\n\t%v\n\t%v", i, args.Format(), rf.Format())
 						go rf.sendAppendEntries(i, args)
@@ -616,7 +622,9 @@ func (rf *Raft) applier() {
 		applyMsgs := make([]ApplyMsg, 0)
 		if rf.lastApplied < rf.snapshotIndex {
 			rf.lastApplied = rf.snapshotIndex
-			applyMsg := ApplyMsg{SnapshotValid: true, Snapshot: rf.snapshot, SnapshotTerm: rf.snapshotTerm, SnapshotIndex: rf.snapshotIndex}
+			data := make([]byte, len(rf.snapshot))
+			copy(data, rf.snapshot)
+			applyMsg := ApplyMsg{SnapshotValid: true, Snapshot: data, SnapshotTerm: rf.snapshotTerm, SnapshotIndex: rf.snapshotIndex}
 			applyMsgs = append(applyMsgs, applyMsg)
 		}
 
