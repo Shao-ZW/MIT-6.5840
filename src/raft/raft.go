@@ -73,9 +73,10 @@ type Raft struct {
 	// Look at the paper's Figure 2 for a description of what
 	// state a Raft server must maintain.
 
-	state   int
-	timer   time.Time
-	applyCh chan ApplyMsg
+	state         int
+	timer         time.Time
+	applyCh       chan ApplyMsg
+	heartbeatCond *sync.Cond
 
 	// persistent state on all servers
 	currentTerm   int
@@ -89,6 +90,7 @@ type Raft struct {
 	commitIndex int
 	lastApplied int
 	voteCnt     int
+
 	// volatile state on leaders
 	nextIndex   []int
 	matchIndex  []int
@@ -298,7 +300,16 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	}
 
 	reply.Success = true
-	rf.log = append(rf.log[:logPos + 1], args.Entries...)
+	
+	// handle duplicate RPC requests
+	// rf.log = append(rf.log[:logPos + 1], args.Entries...) // only this line is wrong!
+	for i, entry := range args.Entries {
+		logPos++
+		if logPos >= len(rf.log) || rf.log[logPos].Term != entry.Term {
+			rf.log = append(rf.log[:logPos], args.Entries[i:]...)
+			break
+		}
+	}
 
 	if rf.commitIndex < args.LeaderCommit {
 		if args.LeaderCommit < lastLogIndex {
@@ -443,21 +454,7 @@ func (rf *Raft) sendAppendEntries(server int, args AppendEntriesArgs) {
 			rf.matchIndex[server] = args.PrevLogIndex + len(args.Entries)
 		} else {
 			rf.nextIndex[server] = reply.ConflictIndex
-			prevLogIndex := rf.nextIndex[server] - 1
-			prevLogPos := prevLogIndex - rf.log[0].Index
-
-			if prevLogPos < 0 {
-				data := make([]byte, len(rf.snapshot))
-				copy(data, rf.snapshot)
-				args := InstallSnapshotArgs{Term: rf.currentTerm, LeaderId: rf.me, LastIncludedIndex: rf.snapshotIndex, LastIncludedTerm: rf.snapshotTerm, Data: data}
-				go rf.sendInstallSnapshot(server, args)
-			} else {
-				entries := make([]LogEntry, len(rf.log[prevLogPos + 1:]))
-				copy(entries, rf.log[prevLogPos + 1:])
-				prevLogTerm := rf.log[prevLogPos].Term
-				args := AppendEntriesArgs{Term: rf.currentTerm, LeaderId: rf.me, PrevLogIndex: prevLogIndex, PrevLogTerm: prevLogTerm, Entries: entries, LeaderCommit: rf.commitIndex}
-				go rf.sendAppendEntries(server, args)
-			}
+			rf.heartbeatCond.Signal()
 		}
 	}
 	
@@ -512,6 +509,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 
 	logEntry := LogEntry{Command: command, Index: rf.log[len(rf.log) - 1].Index + 1, Term: rf.currentTerm}
 	rf.log = append(rf.log, logEntry)
+	rf.heartbeatCond.Signal()
 	rf.persist()
 	DPrintf(rf.me, "Start:\n\t%v", rf.Format())
 	return logEntry.Index, rf.currentTerm, true
@@ -570,8 +568,16 @@ func (rf *Raft) ticker() {
 }
 
 func (rf *Raft) heartBeater() {
+	go func ()  {
+		for !rf.killed() {
+			rf.heartbeatCond.Signal()
+			time.Sleep(time.Duration(80) * time.Millisecond)
+		}
+	}()
+
 	for !rf.killed() {
 		rf.mu.Lock()
+		rf.heartbeatCond.Wait()
 		if rf.state == Leader {
 			for i := range rf.peers {
 				if i != rf.me {
@@ -610,9 +616,6 @@ func (rf *Raft) heartBeater() {
 			}
 		}
 		rf.mu.Unlock()
-
-		// send heartbeat every 100ms
-		time.Sleep(time.Duration(100) * time.Millisecond)
 	}
 }
 
@@ -640,8 +643,8 @@ func (rf *Raft) applier() {
 			DPrintf(rf.me, "Apply Log:\n\t%v", applyMsg.Format())
 		}
 
-		// try to apply the log to state machine every 100ms
-		time.Sleep(time.Duration(100) * time.Millisecond)
+		// try to apply the log to state machine every 50ms
+		time.Sleep(time.Duration(50) * time.Millisecond)
 	}
 }
 
@@ -670,6 +673,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.lastApplied = 0
 	rf.voteCnt = 0
 	rf.applyCh = applyCh
+	rf.heartbeatCond = sync.NewCond(&rf.mu)
 	rf.timer = time.Now()
 	rf.nextIndex = make([]int, len(peers))
 	rf.matchIndex = make([]int, len(peers))
