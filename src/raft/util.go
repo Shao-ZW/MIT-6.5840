@@ -5,33 +5,42 @@ import "os"
 import "fmt"
 import "time"
 
+func max(a int, b int) int {
+    if a > b {
+        return a
+    }
+    return b
+}
+
+func min(a int, b int) int {
+    if a < b {
+        return a
+    }
+    return b
+}
+
 // Debugging
 const Debug = false
 
-var raftLogs map[int]*log.Logger
-
-func InitDebug(n int) {
-	if Debug {
-		raftLogs = make(map[int]*log.Logger, n)
-		for i := 0; i < n; i++ {
-			filename := fmt.Sprintf("server%d.log", i)
-			logfile, err := os.OpenFile(filename, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0666)
-			if err!= nil {
-				panic(fmt.Sprintf("can't open %v server logger file", i))
-			}
-			raftLogs[i] = log.New(logfile, "", 0)
-		}
+func (rf *Raft) initDebug() {
+    if Debug {
+        if rf.logger == nil {
+            filename := fmt.Sprintf("server%d.log", rf.me)
+            logfile, err := os.OpenFile(filename, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0666)
+            if err!= nil {
+                panic(fmt.Sprintf("can't open %v server logger file", rf.me))
+            }
+            rf.logger = log.New(logfile, "", 0)
+        }
 	}
-}
+} 
 
-func DPrintf(serverId int, format string, a ...interface{}) {
+func DPrintf(logger *log.Logger, format string, a ...interface{}) {
 	if Debug {
-		if logger, ok := raftLogs[serverId]; ok {
-			now := time.Now()
-            prefix := fmt.Sprintf("[%02d:%02d:%02d.%03d]",
-                now.Hour(), now.Minute(), now.Second(), now.Nanosecond()/1000000)
-            logger.Printf("%s %s", prefix, fmt.Sprintf(format, a...))
-		}
+        now := time.Now()
+        prefix := fmt.Sprintf("[%02d:%02d:%02d.%03d]",
+            now.Hour(), now.Minute(), now.Second(), now.Nanosecond()/1000000)
+        logger.Printf("%s %s", prefix, fmt.Sprintf(format, a...))
 	}
 }
 
@@ -44,18 +53,18 @@ func (msg *ApplyMsg) Format() string {
     if msg.CommandValid {
         commandStr = fmt.Sprintf("%v", msg.Command)
     }
-    return fmt.Sprintf("ApplyMsg{CommandValid: %t, Command: %s, CommandIndex: %d, SnapshotValid: %t, SnapshotTerm: %d, SnapshotIndex: %d, Snapshot: %v}", msg.CommandValid, commandStr, msg.CommandIndex, msg.SnapshotValid, msg.SnapshotTerm, msg.SnapshotIndex, msg.Snapshot)
+    return fmt.Sprintf("ApplyMsg{CommandValid: %t, Command: %s, CommandIndex: %d, SnapshotValid: %t, SnapshotTerm: %d, SnapshotIndex: %d}", msg.CommandValid, commandStr, msg.CommandIndex, msg.SnapshotValid, msg.SnapshotTerm, msg.SnapshotIndex)
 }
 
 func (rf *Raft) Format() string {
 	logStr := "[]"
-    if len(rf.log) > 0 {
-       logStr = "["
-       for _, entry := range rf.log {
-          logStr += fmt.Sprintf("%v, ", entry)
-       }
-       logStr = logStr[:len(logStr)-2] + "]"
-    }
+    // if len(rf.log) > 0 {
+    //    logStr = "["
+    //    for _, entry := range rf.log {
+    //       logStr += fmt.Sprintf("%v, ", entry)
+    //    }
+    //    logStr = logStr[:len(logStr)-2] + "]"
+    // }
 
     nextIndexStr := "[]"
     if len(rf.nextIndex) > 0 {

@@ -19,6 +19,7 @@ package raft
 
 import (
 	"bytes"
+	"log"
 	"math/rand"
 	"sync"
 	"sync/atomic"
@@ -77,6 +78,7 @@ type Raft struct {
 	timer         time.Time
 	applyCh       chan ApplyMsg
 	heartbeatCond *sync.Cond
+	applyCond     *sync.Cond
 
 	// persistent state on all servers
 	currentTerm   int
@@ -94,6 +96,9 @@ type Raft struct {
 	// volatile state on leaders
 	nextIndex   []int
 	matchIndex  []int
+
+	// Debug log
+	logger *log.Logger
 }
 
 // return currentTerm and whether this server
@@ -172,7 +177,7 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 	rf.snapshotTerm = rf.log[logPos].Term
 	rf.log = rf.log[logPos:]
 	rf.persist()
-	DPrintf(rf.me, "Receive Snapshot:\n\t%v %v\n\t%v", index, snapshot, rf.Format())
+	DPrintf(rf.logger, "Receive Snapshot:\n\t%v %v\n\t%v", index, snapshot, rf.Format())
 }
 
 
@@ -231,7 +236,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	reply.VoteGranted = false
 
 	if args.Term < rf.currentTerm {
-		DPrintf(rf.me, "Handle RequestVote Request from server %v:\n\t%v\n\t%v\n\t%v", args.CandidateId, args.Format(), reply.Format(), rf.Format())
+		DPrintf(rf.logger, "Handle RequestVote Request from server %v:\n\t%v\n\t%v\n\t%v", args.CandidateId, args.Format(), reply.Format(), rf.Format())
 		return
 	}
 
@@ -253,7 +258,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	}
 
 	rf.persist()
-	DPrintf(rf.me, "Handle RequestVote Request from server %v:\n\t%v\n\t%v\n\t%v", args.CandidateId, args.Format(), reply.Format(), rf.Format())
+	DPrintf(rf.logger, "Handle RequestVote Request from server %v:\n\t%v\n\t%v\n\t%v", args.CandidateId, args.Format(), reply.Format(), rf.Format())
 }
 
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
@@ -265,7 +270,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	reply.ConflictIndex = rf.commitIndex + 1
 
 	if args.Term < rf.currentTerm {
-		DPrintf(rf.me, "Handle AppendEntries Request from server %v:\n\t%v\n\t%v\n\t%v", args.LeaderId, args.Format(), reply.Format(), rf.Format())
+		DPrintf(rf.logger, "Handle AppendEntries Request from server %v:\n\t%v\n\t%v\n\t%v", args.LeaderId, args.Format(), reply.Format(), rf.Format())
 		return
 	}
 
@@ -282,25 +287,32 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	// consistency check
 	if lastLogIndex < args.PrevLogIndex {
 		reply.ConflictIndex = lastLogIndex + 1
-		DPrintf(rf.me, "Handle AppendEntries Request from server %v:\n\t%v\n\t%v\n\t%v", args.LeaderId, args.Format(), reply.Format(), rf.Format())
+		DPrintf(rf.logger, "Handle AppendEntries Request from server %v:\n\t%v\n\t%v\n\t%v", args.LeaderId, args.Format(), reply.Format(), rf.Format())
 		return		
 	}
 
 	logPos := args.PrevLogIndex - rf.log[0].Index
-	logTerm := rf.log[logPos].Term
-	if logTerm != args.PrevLogTerm {
-		for i := logPos; i >= 0; i-- {
-			if rf.log[i].Term != logTerm {
-				reply.ConflictIndex = rf.log[i].Index + 1
-				break
+
+	if logPos >= 0 {
+		logTerm := rf.log[logPos].Term
+		if logTerm != args.PrevLogTerm {
+			for i := logPos; i >= 0; i-- {
+				if rf.log[i].Term != logTerm {
+					reply.ConflictIndex = rf.log[i].Index + 1
+					break
+				}
 			}
+			DPrintf(rf.logger, "Handle AppendEntries Request from server %v:\n\t%v\n\t%v\n\t%v", args.LeaderId, args.Format(), reply.Format(), rf.Format())
+			return		
 		}
-		DPrintf(rf.me, "Handle AppendEntries Request from server %v:\n\t%v\n\t%v\n\t%v", args.LeaderId, args.Format(), reply.Format(), rf.Format())
-		return		
 	}
 
 	reply.Success = true
 	
+	if logPos < 0 {
+		return
+	}
+
 	// handle duplicate RPC requests
 	// rf.log = append(rf.log[:logPos + 1], args.Entries...) // only this line is wrong!
 	for i, entry := range args.Entries {
@@ -312,15 +324,12 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	}
 
 	if rf.commitIndex < args.LeaderCommit {
-		if args.LeaderCommit < lastLogIndex {
-			rf.commitIndex = args.LeaderCommit
-		} else {
-			rf.commitIndex = lastLogIndex
-		}
+		rf.commitIndex = min(args.LeaderCommit, lastLogIndex)
+		rf.applyCond.Signal()
 	}
 
 	rf.persist()
-	DPrintf(rf.me, "Handle AppendEntries Request from server %v:\n\t%v\n\t%v\n\t%v", args.LeaderId, args.Format(), reply.Format(), rf.Format())
+	DPrintf(rf.logger, "Handle AppendEntries Request from server %v:\n\t%v\n\t%v\n\t%v", args.LeaderId, args.Format(), reply.Format(), rf.Format())
 }
 
 func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapshotReply) {
@@ -330,7 +339,7 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 	reply.Term = rf.currentTerm
 
 	if args.Term < rf.currentTerm {
-		DPrintf(rf.me, "Handle InstallSnapshot Request from server %v:\n\t%v\n\t%v\n\t%v", args.LeaderId, args.Format(), reply.Format(), rf.Format())
+		DPrintf(rf.logger, "Handle InstallSnapshot Request from server %v:\n\t%v\n\t%v\n\t%v", args.LeaderId, args.Format(), reply.Format(), rf.Format())
 		return
 	}
 
@@ -344,7 +353,7 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 	rf.timer = time.Now()
 
 	if args.LastIncludedIndex <= rf.snapshotIndex {
-		DPrintf(rf.me, "Handle InstallSnapshot Request from server %v:\n\t%v\n\t%v\n\t%v", args.LeaderId, args.Format(), reply.Format(), rf.Format())
+		DPrintf(rf.logger, "Handle InstallSnapshot Request from server %v:\n\t%v\n\t%v\n\t%v", args.LeaderId, args.Format(), reply.Format(), rf.Format())
 		return
 	}
 
@@ -360,8 +369,9 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 		rf.log = rf.log[logPos:]
 	}
 
+	rf.applyCond.Signal()
 	rf.persist()
-	DPrintf(rf.me, "Handle InstallSnapshot Request from server %v:\n\t%v\n\t%v\n\t%v", args.LeaderId, args.Format(), reply.Format(), rf.Format())
+	DPrintf(rf.logger, "Handle InstallSnapshot Request from server %v:\n\t%v\n\t%v\n\t%v", args.LeaderId, args.Format(), reply.Format(), rf.Format())
 }
 
 // example code to send a RequestVote RPC to a server.
@@ -396,7 +406,7 @@ func (rf *Raft) sendRequestVote(server int, args RequestVoteArgs) {
 	ok := rf.peers[server].Call("Raft.RequestVote", &args, &reply)
 
 	if !ok {
-		DPrintf(rf.me, "Can't Receive RequestVote Reply from server %v", server)
+		DPrintf(rf.logger, "Can't Receive RequestVote Reply from server %v", server)
 		return
 	}
 
@@ -407,7 +417,7 @@ func (rf *Raft) sendRequestVote(server int, args RequestVoteArgs) {
 		rf.state = Follower
 		rf.currentTerm = reply.Term
 		rf.voteFor = -1
-		DPrintf(rf.me, "Handle RequestVote Reply from server %v:\n\t%v\n\t%v\n\t%v", server, args.Format(), reply.Format(), rf.Format())
+		DPrintf(rf.logger, "Handle RequestVote Reply from server %v:\n\t%v\n\t%v\n\t%v", server, args.Format(), reply.Format(), rf.Format())
 		return
 	}
 
@@ -425,7 +435,7 @@ func (rf *Raft) sendRequestVote(server int, args RequestVoteArgs) {
 		}
 	}
 
-	DPrintf(rf.me, "Handle RequestVote Reply from server %v:\n\t%v\n\t%v\n\t%v", server, args.Format(), reply.Format(), rf.Format())
+	DPrintf(rf.logger, "Handle RequestVote Reply from server %v:\n\t%v\n\t%v\n\t%v", server, args.Format(), reply.Format(), rf.Format())
 }
 
 func (rf *Raft) sendAppendEntries(server int, args AppendEntriesArgs) {
@@ -433,7 +443,7 @@ func (rf *Raft) sendAppendEntries(server int, args AppendEntriesArgs) {
 	ok := rf.peers[server].Call("Raft.AppendEntries", &args, &reply)
 	
 	if !ok {
-		DPrintf(rf.me, "Can't Receive AppendEntries Reply from server %v", server)
+		DPrintf(rf.logger, "Can't Receive AppendEntries Reply from server %v", server)
 		return
 	}
 		
@@ -444,21 +454,35 @@ func (rf *Raft) sendAppendEntries(server int, args AppendEntriesArgs) {
 		rf.state = Follower
 		rf.currentTerm = reply.Term
 		rf.voteFor = -1
-		DPrintf(rf.me, "Handle AppendEntries Reply from server %v:\n\t%v\n\t%v\n\t%v", server, args.Format(), reply.Format(), rf.Format())
+		DPrintf(rf.logger, "Handle AppendEntries Reply from server %v:\n\t%v\n\t%v\n\t%v", server, args.Format(), reply.Format(), rf.Format())
 		return
 	}
 		
 	if rf.state == Leader && args.Term == rf.currentTerm {
 		if reply.Success {
-			rf.nextIndex[server] = args.PrevLogIndex + len(args.Entries) + 1
-			rf.matchIndex[server] = args.PrevLogIndex + len(args.Entries)
+			rf.nextIndex[server] = max(rf.nextIndex[server], args.PrevLogIndex + len(args.Entries) + 1)
+			rf.matchIndex[server] = max(rf.matchIndex[server], args.PrevLogIndex + len(args.Entries))
+
+			if logPos := rf.matchIndex[server] - rf.log[0].Index; logPos >= 0 && rf.log[logPos].Term == rf.currentTerm && rf.log[logPos].Index > rf.commitIndex {
+				cnt := 1
+				for i := range rf.peers {
+					if i != rf.me && rf.matchIndex[i] >= rf.matchIndex[server] {
+						cnt += 1
+					}
+				}
+
+				if cnt > len(rf.peers) / 2 {
+					rf.commitIndex = rf.matchIndex[server]
+					rf.applyCond.Signal()
+				}
+			}
 		} else {
 			rf.nextIndex[server] = reply.ConflictIndex
 			rf.heartbeatCond.Signal()
 		}
 	}
 	
-	DPrintf(rf.me, "Handle AppendEntries Reply from server %v:\n\t%v\n\t%v\n\t%v", server, args.Format(), reply.Format(), rf.Format())
+	DPrintf(rf.logger, "Handle AppendEntries Reply from server %v:\n\t%v\n\t%v\n\t%v", server, args.Format(), reply.Format(), rf.Format())
 }
 
 func (rf *Raft) sendInstallSnapshot(server int, args InstallSnapshotArgs) {
@@ -466,7 +490,7 @@ func (rf *Raft) sendInstallSnapshot(server int, args InstallSnapshotArgs) {
 	ok := rf.peers[server].Call("Raft.InstallSnapshot", &args, &reply)
 
 	if !ok {
-		DPrintf(rf.me, "Can't Receive InstallSnapshot Reply from server %v", server)
+		DPrintf(rf.logger, "Can't Receive InstallSnapshot Reply from server %v", server)
 		return
 	}
 
@@ -479,11 +503,11 @@ func (rf *Raft) sendInstallSnapshot(server int, args InstallSnapshotArgs) {
 			rf.currentTerm = reply.Term
 			rf.voteFor = -1
 		}
-		rf.nextIndex[server] = rf.snapshotIndex + 1
-		rf.matchIndex[server] = rf.snapshotIndex
+		rf.nextIndex[server] = max(rf.nextIndex[server], rf.snapshotIndex + 1)
+		rf.matchIndex[server] = max(rf.matchIndex[server], rf.snapshotIndex)
 	}
 
-	DPrintf(rf.me, "Handle InstallSnapshot Reply from server %v:\n\t%v\n\t%v\n\t%v", server, args.Format(), reply.Format(), rf.Format())
+	DPrintf(rf.logger, "Handle InstallSnapshot Reply from server %v:\n\t%v\n\t%v\n\t%v", server, args.Format(), reply.Format(), rf.Format())
 }
 
 // the service using Raft (e.g. a k/v server) wants to start
@@ -511,7 +535,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	rf.log = append(rf.log, logEntry)
 	rf.heartbeatCond.Signal()
 	rf.persist()
-	DPrintf(rf.me, "Start:\n\t%v", rf.Format())
+	DPrintf(rf.logger, "Start: %v\n\t%v", command, rf.Format())
 	return logEntry.Index, rf.currentTerm, true
 }
 
@@ -552,7 +576,7 @@ func (rf *Raft) ticker() {
 				for i := range rf.peers {
 					if i != rf.me {
 						args := RequestVoteArgs{Term: rf.currentTerm, CandidateId: rf.me, LastLogIndex: lastLogIndex, LastLogTerm: lastLogTerm}
-						DPrintf(rf.me, "Start Send VoteRequest to server %v:\n\t%v\n\t%v", i, args.Format(), rf.Format())
+						DPrintf(rf.logger, "Start Send VoteRequest to server %v:\n\t%v\n\t%v", i, args.Format(), rf.Format())
 						go rf.sendRequestVote(i, args)
 					}
 				}
@@ -571,7 +595,7 @@ func (rf *Raft) heartBeater() {
 	go func ()  {
 		for !rf.killed() {
 			rf.heartbeatCond.Signal()
-			time.Sleep(time.Duration(80) * time.Millisecond)
+			time.Sleep(time.Duration(100) * time.Millisecond)
 		}
 	}()
 
@@ -588,14 +612,14 @@ func (rf *Raft) heartBeater() {
 						data := make([]byte, len(rf.snapshot))
 						copy(data, rf.snapshot)
 						args := InstallSnapshotArgs{Term: rf.currentTerm, LeaderId: rf.me, LastIncludedIndex: rf.snapshotIndex, LastIncludedTerm: rf.snapshotTerm, Data: data}
-						DPrintf(rf.me, "Start Send InstallSnapshot Request to server %v:\n\t%v\n\t%v", i, args.Format(), rf.Format())
+						DPrintf(rf.logger, "Start Send InstallSnapshot Request to server %v:\n\t%v\n\t%v", i, args.Format(), rf.Format())
 						go rf.sendInstallSnapshot(i, args)
 					} else {
 						entries := make([]LogEntry, len(rf.log[prevLogPos + 1:]))
 						copy(entries, rf.log[prevLogPos + 1:])
 						prevLogTerm := rf.log[prevLogPos].Term
 						args := AppendEntriesArgs{Term: rf.currentTerm, LeaderId: rf.me, PrevLogIndex: prevLogIndex, PrevLogTerm: prevLogTerm, Entries: entries, LeaderCommit: rf.commitIndex}
-						DPrintf(rf.me, "Start Send Heartbeats(AppendRequest) to server %v:\n\t%v\n\t%v", i, args.Format(), rf.Format())
+						DPrintf(rf.logger, "Start Send Heartbeats(AppendRequest) to server %v:\n\t%v\n\t%v", i, args.Format(), rf.Format())
 						go rf.sendAppendEntries(i, args)
 					}
 				}
@@ -622,6 +646,10 @@ func (rf *Raft) heartBeater() {
 func (rf *Raft) applier() {
 	for !rf.killed() {
 		rf.mu.Lock()
+		for rf.lastApplied >= rf.snapshotIndex && rf.lastApplied >= rf.commitIndex {
+			rf.applyCond.Wait()
+		}
+
 		applyMsgs := make([]ApplyMsg, 0)
 		if rf.lastApplied < rf.snapshotIndex {
 			rf.lastApplied = rf.snapshotIndex
@@ -640,11 +668,8 @@ func (rf *Raft) applier() {
 
 		for _, applyMsg := range applyMsgs {
 			rf.applyCh <- applyMsg
-			DPrintf(rf.me, "Apply Log:\n\t%v", applyMsg.Format())
+			DPrintf(rf.logger, "Apply Log:\n\t%v", applyMsg.Format())
 		}
-
-		// try to apply the log to state machine every 50ms
-		time.Sleep(time.Duration(50) * time.Millisecond)
 	}
 }
 
@@ -674,6 +699,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.voteCnt = 0
 	rf.applyCh = applyCh
 	rf.heartbeatCond = sync.NewCond(&rf.mu)
+	rf.applyCond = sync.NewCond(&rf.mu)
 	rf.timer = time.Now()
 	rf.nextIndex = make([]int, len(peers))
 	rf.matchIndex = make([]int, len(peers))
@@ -684,6 +710,9 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
 	rf.snapshot = persister.ReadSnapshot()
+	
+	// Debug log
+	rf.initDebug()
 
 	// start ticker goroutine to start elections
 	go rf.ticker()
